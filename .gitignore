@@ -1,0 +1,25 @@
+# Environment
+.env
+
+# Cache files
+api_cache.json
+response_cache*.json
+ctis_cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Claude Code
+CLAUDE.md
+.claude/
+
+# OS
+.DS_Store
