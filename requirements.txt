@@ -1,0 +1,10 @@
+flask
+requests
+pandas
+fuzzywuzzy
+python-Levenshtein
+openai
+python-dotenv
+mcp[cli]
+uvicorn
+starlette
