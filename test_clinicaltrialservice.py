@@ -7,6 +7,14 @@ import tempfile
 from clinicaltrialservice import app, api_cache, response_cache, get_api_cache_key, get_response_cache_key, is_cache_valid
 
 
+@pytest.fixture(autouse=True)
+def isolated(monkeypatch):
+    """Keep tests off CTIS and off the cache files: no CTIS trials, no cached responses."""
+    monkeypatch.setattr('clinicaltrialservice._ctis_fetch_parsed', lambda *args, **kwargs: [])
+    monkeypatch.setattr('clinicaltrialservice.get_cached_response', lambda *args: None)
+    monkeypatch.setattr('clinicaltrialservice.set_response_cache_response', lambda *args: None)
+
+
 @pytest.fixture
 def client():
     """Create a test client for the Flask application."""
@@ -66,7 +74,7 @@ def mock_trial_data():
                         ]
                     },
                     'eligibilityModule': {
-                        'criteria': 'Inclusion: Age 18-65, diagnosed with cancer. Exclusion: Pregnant.',
+                        'eligibilityCriteria': 'Inclusion Criteria:\n* Age 18-65, diagnosed with cancer\n\nExclusion Criteria:\n* Pregnant',
                         'minimumAge': '18 Years',
                         'maximumAge': '65 Years',
                         'gender': 'ALL'
@@ -106,7 +114,7 @@ def mock_trial_data():
                         ]
                     },
                     'eligibilityModule': {
-                        'criteria': 'Inclusion: Age 21+',
+                        'eligibilityCriteria': 'Inclusion Criteria:\n* Age 21+',
                         'minimumAge': '21 Years',
                         'maximumAge': 'N/A',
                         'gender': 'ALL'
@@ -275,27 +283,22 @@ class TestSpecializedCentersEndpoint:
 
     def test_specialized_centers_fuzzy_matching(self, client, valid_api_key):
         """Test that fuzzy matching works for similar facility names."""
-        # Create data with similar facility names
+        # Five trials at the same hospital, spelled in slightly different ways
+        # (only centres with more than 4 trials are returned)
+        names = ['General Hospital', 'General Hospital', 'General Hospital NYC',
+                 'The General Hospital', 'General Hospital']
         similar_facilities_data = {
             'studies': [
                 {
                     'protocolSection': {
-                        'identificationModule': {'nctId': 'NCT1'},
+                        'identificationModule': {'nctId': f'NCT{i}'},
                         'contactsLocationsModule': {
-                            'locations': [{'facility': 'General Hospital', 'city': 'NYC', 'country': 'United States'}]
+                            'locations': [{'facility': name, 'city': 'NYC', 'country': 'United States'}]
                         },
-                        'armsInterventionsModule': {'interventions': [{'name': 'Drug A'}]}
-                    }
-                },
-                {
-                    'protocolSection': {
-                        'identificationModule': {'nctId': 'NCT2'},
-                        'contactsLocationsModule': {
-                            'locations': [{'facility': 'General Hospital', 'city': 'NYC', 'country': 'United States'}]
-                        },
-                        'armsInterventionsModule': {'interventions': [{'name': 'Drug B'}]}
+                        'armsInterventionsModule': {'interventions': [{'name': f'Drug {i}'}]}
                     }
                 }
+                for i, name in enumerate(names)
             ]
         }
 
@@ -311,8 +314,9 @@ class TestSpecializedCentersEndpoint:
             assert response.status_code == 200
             data = response.json
             assert 'centers' in data
-            assert len(data['centers']) >= 1
-            # Both trials should be counted under the same facility
+            assert len(data['centers']) == 1
+            assert data['centers'][0]['facility'] == 'General Hospital'
+            assert data['centers'][0]['trialCount'] == 5
 
 
 class TestAvailableTreatmentsEndpoint:
@@ -392,6 +396,26 @@ class TestCheckEligibilityEndpoint:
             assert 'eligibility' in data
             assert data['eligibility']['result'] == 'yes'
             assert 'explanation' in data['eligibility']
+
+    def test_check_eligibility_sends_trial_criteria(self, client, valid_api_key, mock_trial_data):
+        """The prompt carries the trial's inclusion and exclusion criteria."""
+        mock_openai_response = MagicMock()
+        mock_openai_response.choices = [
+            MagicMock(message=MagicMock(content='{"result": "unknown", "explanation": "Missing data."}'))
+        ]
+
+        with patch('clinicaltrialservice.get_trial_data', return_value=mock_trial_data), \
+             patch('clinicaltrialservice.client.chat.completions.create', return_value=mock_openai_response) as mock_create:
+            client.post(
+                '/check_eligibility',
+                json={'nctId': 'NCT12345678', 'disease': 'cancer', 'patient_info': 'Age: 45'},
+                headers={'x-api-key': valid_api_key}
+            )
+
+        prompt = mock_create.call_args.kwargs['messages'][1]['content']
+        assert 'INCLUSION CRITERIA:\n* Age 18-65, diagnosed with cancer' in prompt
+        assert 'EXCLUSION CRITERIA:\n* Pregnant' in prompt
+        assert 'No criteria provided' not in prompt
 
     def test_check_eligibility_missing_parameters(self, client, valid_api_key):
         """Test eligibility check with missing parameters."""
@@ -610,8 +634,88 @@ class TestDataExtraction:
             assert 'StudyType' in trial
             assert 'EligibilityModule' in trial
 
+            # Fields added in v2
+            assert trial['OverallStatus'] == 'RECRUITING'
+            assert trial['Registry'] == 'clinicaltrials.gov'
+            assert 'StartDate' in trial
+            assert 'LeadSponsor' in trial
+            assert 'EnrollmentCount' in trial
+
             # Check URL format
             assert trial['StudyUrl'].startswith('https://clinicaltrials.gov/study/')
+
+    def test_ctis_trials_in_all_trials(self, client, valid_api_key, mock_trial_data, ctis_raw, ctis_overview):
+        """CTIS trials carry their registry, status and sites."""
+        from clinicaltrialservice import _ctis_parse_trial
+        parsed = [_ctis_parse_trial(ctis_raw, ctis_overview)]
+        with patch('clinicaltrialservice.get_trial_data', return_value=mock_trial_data), \
+             patch('clinicaltrialservice._ctis_fetch_parsed', return_value=parsed):
+            response = client.get('/all_trials?disease=cancer&country=Italy', headers={'x-api-key': valid_api_key})
+
+        trials = response.json['trials']
+        assert [t['NCTId'] for t in trials] == ['2025-500001-11-00']
+        assert trials[0]['Registry'] == 'ctis'
+        assert trials[0]['OverallStatus'] == 'AUTHORISED'
+
+
+class TestTrialEndpoint:
+    """Test /trial/<trial_id> endpoint."""
+
+    def test_requires_api_key(self, client):
+        assert client.get('/trial/NCT12345678').status_code == 401
+
+    def test_nct_from_disease_cache(self, client, valid_api_key, mock_trial_data):
+        cache = {'k': {'timestamp': datetime.now().timestamp(), 'data': mock_trial_data}}
+        with patch.dict('clinicaltrialservice.api_cache', cache, clear=True), \
+             patch('clinicaltrialservice.requests.get') as mock_get:
+            response = client.get('/trial/NCT87654321', headers={'x-api-key': valid_api_key})
+
+        assert response.status_code == 200
+        trial = response.json['trial']
+        assert trial['NCTId'] == 'NCT87654321'
+        assert trial['OverallStatus'] == 'COMPLETED'
+        assert trial['Details']['protocolSection']['identificationModule']['nctId'] == 'NCT87654321'
+        mock_get.assert_not_called()
+
+    def test_nct_downloaded(self, client, valid_api_key, mock_trial_data):
+        study = mock_trial_data['studies'][0]
+        with patch.dict('clinicaltrialservice.api_cache', {}, clear=True), \
+             patch.dict('clinicaltrialservice.trial_cache', {}, clear=True), \
+             patch('clinicaltrialservice.open', mock_open(), create=True), \
+             patch('clinicaltrialservice.requests.get', return_value=MagicMock(status_code=200, json=lambda: study)) as mock_get:
+            response = client.get('/trial/nct12345678', headers={'x-api-key': valid_api_key})
+
+        assert response.status_code == 200
+        assert response.json['trial']['NCTId'] == 'NCT12345678'
+        assert mock_get.call_args[0][0] == 'https://clinicaltrials.gov/api/v2/studies/NCT12345678'
+
+    def test_nct_not_found(self, client, valid_api_key):
+        with patch.dict('clinicaltrialservice.api_cache', {}, clear=True), \
+             patch.dict('clinicaltrialservice.trial_cache', {}, clear=True), \
+             patch('clinicaltrialservice.requests.get', return_value=MagicMock(status_code=404)):
+            response = client.get('/trial/NCT99999999', headers={'x-api-key': valid_api_key})
+
+        assert response.status_code == 404
+        assert 'not found' in response.json['error']
+
+    def test_euct(self, client, valid_api_key, ctis_raw, ctis_overview):
+        with patch('clinicaltrialservice._ctis_get_detail', return_value=ctis_raw), \
+             patch('clinicaltrialservice._ctis_get_overview', return_value=ctis_overview):
+            response = client.get('/trial/2025-500001-11-00', headers={'x-api-key': valid_api_key})
+
+        assert response.status_code == 200
+        trial = response.json['trial']
+        assert trial['Registry'] == 'ctis'
+        assert trial['Details']['exclusion_criteria'] == '1. Prior radiotherapy'
+
+    def test_euct_not_found(self, client, valid_api_key):
+        with patch('clinicaltrialservice._ctis_get_detail', return_value=None):
+            response = client.get('/trial/2023-505701-14-00', headers={'x-api-key': valid_api_key})
+        assert response.status_code == 404
+
+    def test_unrecognised_id(self, client, valid_api_key):
+        response = client.get('/trial/abc', headers={'x-api-key': valid_api_key})
+        assert response.status_code == 400
 
 
 if __name__ == '__main__':

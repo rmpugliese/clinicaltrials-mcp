@@ -34,6 +34,7 @@ Two server implementations sharing the same data layer:
 | `response_cache_flask.json` | Processed Flask responses | MD5 of endpoint+disease+country |
 | `response_cache_mcp.json` | Processed MCP responses | MD5 of endpoint+disease+country |
 | `ctis_cache.json` | CTIS trial details and lists | MD5 of EUCT code or query |
+| `trial_cache.json` | Single ClinicalTrials.gov studies fetched by `get_trial` | NCT ID |
 
 ## Installation
 
@@ -104,6 +105,35 @@ All trials for a disease, with optional country filter.
 | `disease` | string | yes |
 | `country` | string | no |
 
+Each trial in `/current_trials` and `/all_trials` carries:
+
+| Field | Notes |
+|-------|-------|
+| `NCTId` | NCT ID, or EUCT number for CTIS trials |
+| `Registry` | `clinicaltrials.gov` or `ctis` |
+| `OverallStatus` | Registry's own vocabulary: ClinicalTrials.gov (`RECRUITING`, `COMPLETED`, ...) or CTIS (`AUTHORISED`, `ENDED`, `HALTED`, ...) |
+| `RecruitmentStarted` | CTIS only: recruitment has started in at least one country (CTIS does not say whether an authorised trial is recruiting) |
+| `StartDate`, `CompletionDate` | CTIS: `CompletionDate` is the estimated end date |
+| `LeadSponsor`, `EnrollmentCount` | |
+| `BriefTitle`, `BriefSummary`, `StudyUrl`, `Phases`, `StudyType` | |
+| `InterventionType`, `InterventionName` | Parallel lists |
+| `Locations` | `facility`, `city`, `state`, `country` |
+| `EligibilityModule` | ClinicalTrials.gov module as-is; CTIS: `criteria`, `gender`, `stdAges` (age groups) |
+
+### `GET /trial/<trial_id>`
+
+One trial in full, by NCT ID or EUCT number. Served from the cache when available, otherwise downloaded.
+
+Returns `{"trial": {...}}` with the fields above plus `Details`:
+
+- ClinicalTrials.gov: `{"protocolSection": ..., "hasResults": bool}` — the registry's full protocol (eligibility, arms, outcomes, locations with status and contacts). Posted results are not included.
+- CTIS: objectives, endpoints, inclusion/exclusion criteria, products, sponsor and its public contact, sites, status and recruitment per country, dates, enrollment, and `nct_number` when the trial is also on ClinicalTrials.gov.
+
+```bash
+curl -H "x-api-key: <key>" "http://localhost:5000/trial/NCT07284069"
+curl -H "x-api-key: <key>" "http://localhost:5000/trial/2025-522605-37-00"
+```
+
 ### `GET /specialized_centers`
 
 Treatment centers with more than 4 trials, ranked by trial count. Similar facility names are deduplicated via fuzzy matching.
@@ -157,6 +187,7 @@ When used as an MCP server, the same functionality is available as tools:
 | `get_all_trials` | `GET /all_trials` |
 | `get_specialized_centers` | `GET /specialized_centers` |
 | `get_available_treatments` | `GET /available_treatments` |
+| `get_trial` | `GET /trial/<trial_id>` |
 | `check_eligibility` | `POST /check_eligibility` |
 
 ### MCP Client Configuration (Claude Desktop)
@@ -180,9 +211,9 @@ Authorization: Bearer <your-api-key>
 
 ## Testing
 
-Unit tests (no server required):
+Unit tests (no server, no network, no `.env` required):
 ```bash
-pytest test_clinicaltrialservice.py -v
+pytest test_clinicaltrialservice.py test_clinicaltrials_mcp.py test_trial_records.py -v
 ```
 
 Interactive test against a running Flask server:

@@ -5,7 +5,6 @@ from fuzzywuzzy import fuzz
 import hashlib
 import json
 import os
-import re
 import time
 from datetime import datetime
 from dotenv import load_dotenv
@@ -14,6 +13,16 @@ import argparse
 import openai  # This line is required to use the openai module
 from openai import OpenAI
 from typing import Optional
+
+from trial_records import (
+    CTIS_COUNTRY_TO_ISO as _CTIS_COUNTRY_TO_ISO,
+    ctgov_details,
+    ctis_normalize as _ctis_normalize,
+    ctis_parse_trial as _ctis_parse_trial,
+    is_euct_id as _is_euct_id,
+    is_nct_id,
+    simplify_ctgov,
+)
 
 # Load environment variables
 load_dotenv()
@@ -26,7 +35,11 @@ app = Flask(__name__)
 API_CACHE_FILE = 'api_cache.json'  # Cache for API calls to clinicaltrials.gov
 RESPONSE_CACHE_FILE = 'response_cache_flask.json'  # Cache for responses to microservice endpoints
 CTIS_CACHE_FILE = 'ctis_cache.json'  # Cache for CTIS API calls
+TRIAL_CACHE_FILE = 'trial_cache.json'  # Cache for single ClinicalTrials.gov studies
 CACHE_TIMEOUT = 86400  # Cache expiry time in seconds (24 hours)
+# Bump when the shape of the returned records changes, so cached responses
+# built with the old shape are not served.
+RECORD_VERSION = 'v2'
 
 # Load caches if they exist
 if os.path.exists(API_CACHE_FILE):
@@ -50,6 +63,15 @@ if os.path.exists(CTIS_CACHE_FILE):
 else:
     ctis_cache = {}
 
+if os.path.exists(TRIAL_CACHE_FILE):
+    with open(TRIAL_CACHE_FILE, 'r') as f:
+        try:
+            trial_cache = json.load(f)
+        except json.JSONDecodeError:
+            trial_cache = {}
+else:
+    trial_cache = {}
+
 API_BASE_URL = "https://clinicaltrials.gov/api/v2/studies"
 
 # Load allowed API keys from .env file
@@ -60,7 +82,7 @@ def get_api_cache_key(disease):
     return hashlib.md5(disease.encode('utf-8')).hexdigest()
 
 def get_response_cache_key(endpoint, disease, country):
-    return hashlib.md5(f"{endpoint}_{disease}_{country}".encode('utf-8')).hexdigest()
+    return hashlib.md5(f"{RECORD_VERSION}_{endpoint}_{disease}_{country}".encode('utf-8')).hexdigest()
 
 def is_cache_valid(entry):
     return (datetime.now().timestamp() - entry['timestamp']) < CACHE_TIMEOUT
@@ -120,6 +142,38 @@ def get_trial_data(disease):
     return {'studies': all_studies}
 
 
+def get_study(nct_id):
+    """
+    Return (study, error, status_code) for one ClinicalTrials.gov study.
+    Looks in the per-disease cache first, then in the per-trial cache, then asks the API.
+    """
+    for entry in api_cache.values():
+        if not is_cache_valid(entry):
+            continue
+        for study in entry.get('data', {}).get('studies', []):
+            if study.get('protocolSection', {}).get('identificationModule', {}).get('nctId') == nct_id:
+                return study, None, 200
+
+    entry = trial_cache.get(nct_id)
+    if entry and is_cache_valid(entry):
+        return entry['data'], None, 200
+
+    try:
+        response = requests.get(f"{API_BASE_URL}/{nct_id}", timeout=30)
+    except requests.RequestException as e:
+        return None, f'ClinicalTrials.gov request failed: {e.__class__.__name__}', 502
+    if response.status_code == 404:
+        return None, f'Trial {nct_id} not found', 404
+    if response.status_code != 200:
+        return None, f'ClinicalTrials.gov request failed (HTTP {response.status_code})', 502
+
+    study = response.json()
+    trial_cache[nct_id] = {'timestamp': datetime.now().timestamp(), 'data': study}
+    with open(TRIAL_CACHE_FILE, 'w') as f:
+        json.dump(trial_cache, f)
+    return study, None, 200
+
+
 # ---------------------------------------------------------------------------
 # CTIS constants and mappings
 # ---------------------------------------------------------------------------
@@ -138,28 +192,6 @@ _CTIS_STATUS_ALIASES: dict = {
     "ongoing": [2, 3],   # Authorised + Ongoing
     "all":     [1, 2, 3, 4, 5, 6, 7, 8, 9],
 }
-
-_CTIS_ISO_TO_COUNTRY: dict = {
-    "IT": "Italy",       "DE": "Germany",     "FR": "France",
-    "ES": "Spain",       "PL": "Poland",      "NL": "Netherlands",
-    "BE": "Belgium",     "AT": "Austria",     "PT": "Portugal",
-    "CZ": "Czechia",     "HU": "Hungary",     "RO": "Romania",
-    "SE": "Sweden",      "DK": "Denmark",     "NO": "Norway",
-    "FI": "Finland",     "GR": "Greece",      "BG": "Bulgaria",
-    "HR": "Croatia",     "SK": "Slovakia",    "SI": "Slovenia",
-    "LT": "Lithuania",   "LV": "Latvia",      "EE": "Estonia",
-    "LU": "Luxembourg",  "MT": "Malta",       "CY": "Cyprus",
-    "IE": "Ireland",     "IS": "Iceland",     "LI": "Liechtenstein",
-}
-_CTIS_COUNTRY_TO_ISO: dict = {v: k for k, v in _CTIS_ISO_TO_COUNTRY.items()}
-
-_EUCT_RE = re.compile(r"^\d{4}-\d{6}-\d{2}-\d{2}$")
-
-
-def _is_euct_id(trial_id: str) -> bool:
-    """Return True if trial_id matches the EUCT format (e.g. '2023-505701-14-00')."""
-    return bool(_EUCT_RE.match(trial_id.strip()))
-
 
 # ---------------------------------------------------------------------------
 # CTIS API functions (adapted from ctis_scraper.py, no print statements)
@@ -233,6 +265,8 @@ def _ctis_get_detail(euct_code: str) -> Optional[dict]:
         raw = r.json()
     except requests.RequestException:
         return None
+    if not raw:  # unknown or unpublished trials come back as {}
+        return None
 
     ctis_cache[cache_key] = {"timestamp": datetime.now().timestamp(), "data": raw}
     with open(CTIS_CACHE_FILE, 'w') as f:
@@ -240,86 +274,27 @@ def _ctis_get_detail(euct_code: str) -> Optional[dict]:
     return raw
 
 
-def _ctis_find_nct(raw: dict, other_ids: dict) -> str:
-    """Search for an NCT cross-reference number inside a CTIS trial JSON."""
-    for c in [other_ids.get("nctNumber", ""), other_ids.get("NCTNumber", ""),
-               raw.get("nctNumber", ""), raw.get("NCTId", "")]:
-        if c and re.match(r"NCT\d{8}", str(c), re.I):
-            return c.upper()
-    matches = re.findall(r"NCT\d{8}", json.dumps(raw), re.I)
-    return matches[0].upper() if matches else ""
+def _ctis_get_overview(euct_code: str) -> Optional[dict]:
+    """Fetch a trial's row from the CTIS search endpoint, with per-trial caching."""
+    cache_key = f"ctis_overview_{hashlib.md5(euct_code.encode()).hexdigest()}"
+    entry = ctis_cache.get(cache_key)
+    if entry and is_cache_valid(entry):
+        return entry["data"]
 
-
-def _ctis_parse_trial(raw: dict) -> dict:
-    """Normalize a raw CTIS trial JSON into a flat dict."""
-    part1 = raw.get("authorizedApplication", {}).get("authorizedPartI", {})
-    sci   = part1.get("trialDetails", {})
-    proto = part1.get("protocolInformation", {})
-    pop   = part1.get("populationDetails", {})
-    elig  = part1.get("eligibilityCriteria", {})
-
-    euct = raw.get("ctNumber", "")
-    result = {
-        "euct_number":        euct,
-        "ctis_status":        raw.get("ctStatus", ""),
-        "ctis_url":           f"https://euclinicaltrials.eu/ctis-public/search#{euct}",
-        "title":              sci.get("fullTitle") or raw.get("ctTitle", ""),
-        "short_title":        sci.get("shortTitle") or raw.get("shortTitle", ""),
-        "lay_summary":        sci.get("laySummary", ""),
-        "primary_objective":  sci.get("primaryObjective", ""),
-        "trial_phase":        raw.get("trialPhase") or proto.get("trialPhaseName", ""),
-        "trial_type":         proto.get("trialTypeName", ""),
-        "gender":             raw.get("gender", ""),
-        "min_age_months":     pop.get("minAgeValue"),
-        "max_age_months":     pop.get("maxAgeValue"),
-        "inclusion_criteria": elig.get("inclusionCriteria", ""),
-        "exclusion_criteria": elig.get("exclusionCriteria", ""),
-        "sponsor":            raw.get("sponsor", ""),
-        "trial_countries":    raw.get("trialCountries", []),
-    }
-
-    products = part1.get("products", [])
-    result["interventions"] = [
-        {
-            "name": (p.get("productDictionaryInfo", {}).get("prodName")
-                     or p.get("productName", "")),
-            "active_substance": p.get("productDictionaryInfo", {}).get("activeSubstanceName", ""),
-        }
-        for p in products
-        if p.get("productDictionaryInfo", {}).get("prodName") or p.get("productName")
-    ]
-
-    mscs = raw.get("authorizedApplication", {}).get("memberStateConcerned", [])
-    sites = []
-    for msc in mscs:
-        cc = msc.get("mscCode", "")
-        for site in msc.get("trialSites", []):
-            sites.append({
-                "country":     cc,
-                "name":        site.get("siteName", ""),
-                "city":        site.get("city", ""),
-                "institution": site.get("institution", ""),
-                "pi":          site.get("principalInvestigator", ""),
-            })
-    result["sites"]   = sites
-    result["n_sites"] = len(sites)
-
-    other_ids = part1.get("otherIdentifiers", {})
-    result["nct_number"] = _ctis_find_nct(raw, other_ids)
-    result["eudract"]    = other_ids.get("eudraCtNumber", "")
-
-    return {k: v for k, v in result.items()
-            if v is not None and v != "" and v != [] and v != {}}
-
-
-def _ctis_age_str(months: Optional[int]) -> str:
-    """Convert CTIS month-based age to a human-readable string."""
-    if months is None:
-        return "not specified"
-    if months % 12 == 0:
-        years = months // 12
-        return f"{years} Year{'s' if years != 1 else ''}"
-    return f"{months} Month{'s' if months != 1 else ''}"
+    payload = _ctis_build_payload(None, None, page=1, page_size=5)
+    payload["searchCriteria"]["number"] = euct_code
+    try:
+        r = requests.post(_CTIS_SEARCH, headers=_CTIS_HEADERS, json=payload, timeout=30)
+        r.raise_for_status()
+        rows = r.json().get("data", [])
+    except (requests.RequestException, ValueError):
+        return None
+    overview = next((row for row in rows if row.get("ctNumber") == euct_code), None)
+    if overview:
+        ctis_cache[cache_key] = {"timestamp": datetime.now().timestamp(), "data": overview}
+        with open(CTIS_CACHE_FILE, 'w') as f:
+            json.dump(ctis_cache, f)
+    return overview
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +308,7 @@ def _ctis_fetch_parsed(disease: str, ctis_status: str = "all",
     Each trial detail is cached individually; the full parsed list is cached
     per (disease, status) combination. Returns list of parsed trial dicts.
     """
-    list_key = f"ctis_list_{hashlib.md5(f'{disease}_{ctis_status}'.encode()).hexdigest()}"
+    list_key = f"ctis_list_{hashlib.md5(f'{RECORD_VERSION}_{disease}_{ctis_status}'.encode()).hexdigest()}"
     entry = ctis_cache.get(list_key)
     if entry and is_cache_valid(entry):
         return entry["data"]
@@ -349,7 +324,7 @@ def _ctis_fetch_parsed(disease: str, ctis_status: str = "all",
         raw = _ctis_get_detail(euct)
         if raw:
             try:
-                results.append(_ctis_parse_trial(raw))
+                results.append(_ctis_parse_trial(raw, ov))
             except Exception:
                 pass
         time.sleep(0.3)
@@ -358,50 +333,6 @@ def _ctis_fetch_parsed(disease: str, ctis_status: str = "all",
     with open(CTIS_CACHE_FILE, 'w') as f:
         json.dump(ctis_cache, f)
     return results
-
-
-def _ctis_normalize(parsed: dict) -> dict:
-    """Convert a parsed CTIS trial to the CT.gov simplified study format."""
-    euct = parsed.get("euct_number", "")
-    interventions = parsed.get("interventions", [])
-    sites = parsed.get("sites", [])
-
-    eligibility: dict = {
-        "minimumAge": _ctis_age_str(parsed.get("min_age_months")),
-        "maximumAge": _ctis_age_str(parsed.get("max_age_months")),
-        "gender":     parsed.get("gender", "All"),
-    }
-    parts = []
-    if parsed.get("inclusion_criteria"):
-        parts.append(f"Inclusion Criteria:\n{parsed['inclusion_criteria']}")
-    if parsed.get("exclusion_criteria"):
-        parts.append(f"Exclusion Criteria:\n{parsed['exclusion_criteria']}")
-    if parts:
-        eligibility["criteria"] = "\n\n".join(parts)
-
-    return {
-        "NCTId": euct,
-        "BriefTitle": parsed.get("title") or parsed.get("short_title", ""),
-        "StudyUrl": parsed.get("ctis_url",
-                               f"https://euclinicaltrials.eu/ctis-public/search#{euct}"),
-        "BriefSummary": parsed.get("lay_summary") or parsed.get("primary_objective", ""),
-        "InterventionType": ["DRUG"] * len(interventions),
-        "InterventionName": [i.get("name", "") for i in interventions],
-        "CompletionDate": None,
-        "Locations": [
-            {
-                "facility": s.get("name") or s.get("institution", ""),
-                "city":     s.get("city", ""),
-                "state":    None,
-                "country":  _CTIS_ISO_TO_COUNTRY.get(s.get("country", ""), s.get("country", "")),
-            }
-            for s in sites
-        ],
-        "Phases":          [parsed["trial_phase"]] if parsed.get("trial_phase") else [],
-        "StudyType":       "INTERVENTIONAL",
-        "EligibilityModule": eligibility,
-        "_source":         "ctis",
-    }
 
 
 def _ctis_dedup(ctgov_results: list, ctis_parsed: list) -> list:
@@ -446,19 +377,7 @@ def current_trials():
                 locations = study.get('protocolSection', {}).get('contactsLocationsModule', {}).get('locations', [])
                 for location in locations:
                     if location.get('country') == country:
-                        simplified_study = {
-                            'NCTId': study.get('protocolSection', {}).get('identificationModule', {}).get('nctId'),
-                            'BriefTitle': study.get('protocolSection', {}).get('identificationModule', {}).get('briefTitle'),
-                            'StudyUrl': f"https://clinicaltrials.gov/study/{study.get('protocolSection', {}).get('identificationModule', {}).get('nctId')}",
-                            'BriefSummary': study.get('protocolSection', {}).get('descriptionModule', {}).get('briefSummary'),
-                            'InterventionType': [intervention.get('type') for intervention in study.get('protocolSection', {}).get('armsInterventionsModule', {}).get('interventions', [])],
-                            'InterventionName': [intervention.get('name') for intervention in study.get('protocolSection', {}).get('armsInterventionsModule', {}).get('interventions', [])],
-                            'CompletionDate': study.get('protocolSection', {}).get('statusModule', {}).get('completionDateStruct', {}).get('date'),
-                            'Locations': [{'facility': loc.get('facility'), 'city': loc.get('city'), 'state': loc.get('state'), 'country': loc.get('country')} for loc in locations],
-                            'Phases': study.get('protocolSection', {}).get('designModule', {}).get('phases', []),
-                            'StudyType': study.get('protocolSection', {}).get('designModule', {}).get('studyType'),
-                            'EligibilityModule': study.get('protocolSection', {}).get('eligibilityModule', {})
-                        }
+                        simplified_study = simplify_ctgov(study)
                         current_trials_list.append(simplified_study)
                         break
         except Exception as e:
@@ -515,19 +434,7 @@ def all_trials():
                 if not any(loc.get('country') == country for loc in locations):
                     continue
 
-            simplified_study = {
-                'NCTId': study.get('protocolSection', {}).get('identificationModule', {}).get('nctId'),
-                'BriefTitle': study.get('protocolSection', {}).get('identificationModule', {}).get('briefTitle'),
-                'StudyUrl': f"https://clinicaltrials.gov/study/{study.get('protocolSection', {}).get('identificationModule', {}).get('nctId')}",
-                'BriefSummary': study.get('protocolSection', {}).get('descriptionModule', {}).get('briefSummary'),
-                'InterventionType': [intervention.get('type') for intervention in study.get('protocolSection', {}).get('armsInterventionsModule', {}).get('interventions', [])],
-                'InterventionName': [intervention.get('name') for intervention in study.get('protocolSection', {}).get('armsInterventionsModule', {}).get('interventions', [])],
-                'CompletionDate': study.get('protocolSection', {}).get('statusModule', {}).get('completionDateStruct', {}).get('date'),
-                'Locations': [{'facility': loc.get('facility'), 'city': loc.get('city'), 'state': loc.get('state'), 'country': loc.get('country')} for loc in locations],
-                'Phases': study.get('protocolSection', {}).get('designModule', {}).get('phases', []),
-                'StudyType': study.get('protocolSection', {}).get('designModule', {}).get('studyType'),
-                'EligibilityModule': study.get('protocolSection', {}).get('eligibilityModule', {})
-            }
+            simplified_study = simplify_ctgov(study)
             all_trials_list.append(simplified_study)
         except Exception as e:
             print(f"Error processing study {study}: {e}")
@@ -789,6 +696,31 @@ def set_response_cache_response(endpoint, disease, country, data):
         json.dump(response_cache, f)
 
 
+@app.route('/trial/<trial_id>', methods=['GET'])
+def trial(trial_id):
+    api_key = request.headers.get('x-api-key')
+    if api_key not in ALLOWED_API_KEYS:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    trial_id = trial_id.strip()
+
+    if _is_euct_id(trial_id):
+        raw = _ctis_get_detail(trial_id)
+        if not raw:
+            return jsonify({'error': f'CTIS trial {trial_id} not found'}), 404
+        parsed = _ctis_parse_trial(raw, _ctis_get_overview(trial_id))
+        return jsonify({'trial': {**_ctis_normalize(parsed), 'Details': parsed}})
+
+    if is_nct_id(trial_id):
+        nct_id = trial_id.upper()
+        study, error, status_code = get_study(nct_id)
+        if error:
+            return jsonify({'error': error}), status_code
+        return jsonify({'trial': {**simplify_ctgov(study), 'Details': ctgov_details(study)}})
+
+    return jsonify({'error': f'Unrecognised trial ID {trial_id!r}: expected NCT######## or an EUCT number'}), 400
+
+
 def split_eligibility_criteria(criteria_text):
     """Split raw criteria text into inclusion and exclusion lists."""
     inclusion, exclusion = "", ""
@@ -823,14 +755,14 @@ def check_eligibility():
         raw = _ctis_get_detail(nct_id)
         if not raw:
             return jsonify({'error': f'CTIS trial {nct_id} not found'}), 404
-        parsed = _ctis_parse_trial(raw)
+        parsed = _ctis_parse_trial(raw, _ctis_get_overview(nct_id))
         inclusion_criteria = parsed.get("inclusion_criteria", "")
         exclusion_criteria = parsed.get("exclusion_criteria", "")
-        min_age       = _ctis_age_str(parsed.get("min_age_months"))
-        max_age       = _ctis_age_str(parsed.get("max_age_months"))
+        min_age       = "not specified"
+        max_age       = "not specified"
         gender        = parsed.get("gender", "not specified")
-        std_ages: list = []
-        brief_summary = parsed.get("lay_summary") or parsed.get("primary_objective", "")
+        std_ages: list = parsed.get("age_groups", [])
+        brief_summary = parsed.get("primary_objective", "")
 
     # ── ClinicalTrials.gov path (NCT ID) ─────────────────────────────────────
     else:
@@ -848,7 +780,10 @@ def check_eligibility():
             return jsonify({'error': 'Trial with specified NCTId not found'}), 404
 
         eligibility_module = trial.get('protocolSection', {}).get('eligibilityModule', {})
-        criteria_text = eligibility_module.get('criteria', 'No criteria provided')
+        # ClinicalTrials.gov API v2 names the field eligibilityCriteria
+        criteria_text = (eligibility_module.get('eligibilityCriteria')
+                         or eligibility_module.get('criteria')
+                         or 'No criteria provided')
         min_age   = eligibility_module.get('minimumAge', 'not specified')
         max_age   = eligibility_module.get('maximumAge', 'not specified')
         gender    = eligibility_module.get('gender', 'not specified')

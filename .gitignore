@@ -5,6 +5,7 @@
 api_cache.json
 response_cache*.json
 ctis_cache.json
+trial_cache.json
 
 # Python
 __pycache__/
