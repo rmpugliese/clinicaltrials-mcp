@@ -28,7 +28,9 @@ CTIS_COUNTRY_TO_ISO: dict = {v: k for k, v in CTIS_ISO_TO_COUNTRY.items()}
 
 # CTIS publishes the overall trial status as a numeric code. Labels measured
 # against the public retrieve endpoint (2026-09-23): codes 2-5 all read
-# "Authorised" there; the portal's finer labels could not be matched to them.
+# "Authorised" there. Their trial events tell them apart (16 trials sampled
+# per code, 2026-09-24): 2 = not started, 3 = started with recruitment mostly
+# not started, 4 = recruiting, 5 = recruitment ended.
 CTIS_STATUS_LABELS: dict = {
     1: "Under evaluation",
     2: "Authorised", 3: "Authorised", 4: "Authorised", 5: "Authorised",
@@ -39,6 +41,9 @@ CTIS_STATUS_LABELS: dict = {
     10: "Revoked",
     11: "Not authorised",
 }
+
+# Status codes that can include trials recruiting in at least one country.
+CTIS_MAY_BE_RECRUITING = [3, 4, 5]
 
 _EUCT_RE = re.compile(r"^\d{4}-\d{6}-\d{2}-\d{2}$")
 _NCT_RE = re.compile(r"^NCT\d{8}$", re.I)
@@ -141,6 +146,39 @@ def _to_int(value) -> Optional[int]:
         return None
 
 
+_RECRUITMENT_ON = {"START_OF_RECRUITMENT", "RESTART_OF_RECRUITMENT"}
+_RECRUITMENT_OFF = {"END_OF_RECRUITMENT", "END_OF_TRIAL", "EARLY_TERMINATION"}
+
+
+def _ctis_recruiting(events: list, has_started: Optional[bool], status: str) -> Optional[bool]:
+    """
+    Whether recruitment is open in one country, replaying its trial events in
+    date order.  Without events, falls back to CTIS's hasRecruitmentStarted flag.
+    """
+    if status and status != "Authorised":
+        return False
+    if not events:
+        return has_started
+    recruiting, halted_from = False, None
+    for event in sorted(events, key=lambda e: e.get("date") or ""):
+        kind = event.get("notificationType")
+        if kind in _RECRUITMENT_ON:
+            recruiting, halted_from = True, None
+        elif kind in _RECRUITMENT_OFF:
+            recruiting, halted_from = False, None
+        elif kind == "TEMPORARY_HALT":
+            halted_from, recruiting = recruiting, False
+        elif kind == "RESTART_OF_TRIAL" and halted_from is not None:
+            recruiting, halted_from = halted_from, None
+    return recruiting
+
+
+def ctis_recruiting_in(parsed: dict, country: str) -> bool:
+    """True if the parsed CTIS trial is recruiting in *country* (e.g. 'Italy')."""
+    return any(c.get("country") == country and c.get("recruiting")
+               for c in parsed.get("country_status", []))
+
+
 def ctis_status_label(raw: dict, overview: Optional[dict] = None) -> str:
     """Overall CTIS status as text (e.g. 'Authorised', 'Ended')."""
     label = raw.get("ctStatus")
@@ -226,13 +264,20 @@ def ctis_parse_trial(raw: dict, overview: Optional[dict] = None) -> dict:
         if p.get("productDictionaryInfo", {}).get("prodName") or p.get("productName")
     ]
 
+    events_by_country = {
+        te.get("mscName"): te.get("events") or []
+        for te in (raw.get("events") or {}).get("trialEvents", [])
+    }
     sites, countries = [], []
     for part2 in app.get("authorizedPartsII", []):
         msc = part2.get("mscInfo", {})
         country_name = msc.get("countryName") or msc.get("mscName", "")
+        country_status = msc.get("trialStatus") or msc.get("reportingStatusCode", "")
+        events = events_by_country.get(msc.get("mscName") or country_name, [])
         countries.append({k: v for k, v in {
             "country":                country_name,
-            "status":                 msc.get("trialStatus") or msc.get("reportingStatusCode", ""),
+            "status":                 country_status,
+            "recruiting":             _ctis_recruiting(events, msc.get("hasRecruitmentStarted"), country_status),
             "recruitment_started":    msc.get("hasRecruitmentStarted"),
             "recruitment_start_date": (msc.get("activeTrialRecruitmentPeriod") or {}).get("recruitmentStartDate", ""),
             "planned_subjects":       part2.get("recruitmentSubjectCount"),
@@ -252,8 +297,8 @@ def ctis_parse_trial(raw: dict, overview: Optional[dict] = None) -> dict:
             }.items() if v})
     result["country_status"] = countries
     result["trial_countries"] = [c["country"] for c in countries if c.get("country")]
-    started = [c["recruitment_started"] for c in countries if "recruitment_started" in c]
-    result["recruitment_started"] = any(started) if started else None
+    recruiting = [c["recruiting"] for c in countries if c.get("recruiting") is not None]
+    result["recruiting"] = any(recruiting) if recruiting else None
     result["sites"] = sites
     result["n_sites"] = len(sites)
 
@@ -301,7 +346,7 @@ def ctis_normalize(parsed: dict) -> dict:
                                f"https://euclinicaltrials.eu/ctis-public/search#{euct}"),
         "BriefSummary": parsed.get("primary_objective", ""),
         "OverallStatus": status_enum(parsed.get("ctis_status", "")) or None,
-        "RecruitmentStarted": parsed.get("recruitment_started"),
+        "Recruiting": parsed.get("recruiting"),
         "StartDate": parsed.get("start_date"),
         "CompletionDate": parsed.get("estimated_end_date"),
         "LeadSponsor": parsed.get("sponsor"),

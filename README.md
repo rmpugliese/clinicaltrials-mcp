@@ -84,7 +84,7 @@ python clinicaltrials_mcp.py --transport sse --port 8080
 
 ### `GET /current_trials`
 
-Recruiting trials with at least one active site in the specified country.
+Trials recruiting in the specified country: ClinicalTrials.gov trials with `RECRUITING` status and a site there, plus CTIS trials whose recruitment is open there according to their trial events.
 
 | Parameter | Type | Required |
 |-----------|------|----------|
@@ -112,7 +112,7 @@ Each trial in `/current_trials` and `/all_trials` carries:
 | `NCTId` | NCT ID, or EUCT number for CTIS trials |
 | `Registry` | `clinicaltrials.gov` or `ctis` |
 | `OverallStatus` | Registry's own vocabulary: ClinicalTrials.gov (`RECRUITING`, `COMPLETED`, ...) or CTIS (`AUTHORISED`, `ENDED`, `HALTED`, ...) |
-| `RecruitmentStarted` | CTIS only: recruitment has started in at least one country (CTIS does not say whether an authorised trial is recruiting) |
+| `Recruiting` | CTIS only: recruitment is open in at least one country, from the trial's events (CTIS's overall status does not say whether an authorised trial is recruiting). `/current_trials` keeps CTIS trials recruiting in the requested country. |
 | `StartDate`, `CompletionDate` | CTIS: `CompletionDate` is the estimated end date |
 | `LeadSponsor`, `EnrollmentCount` | |
 | `BriefTitle`, `BriefSummary`, `StudyUrl`, `Phases`, `StudyType` | |

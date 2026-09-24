@@ -39,7 +39,9 @@ from openai import OpenAI
 
 from trial_records import (
     CTIS_COUNTRY_TO_ISO as _CTIS_COUNTRY_TO_ISO,
+    CTIS_MAY_BE_RECRUITING,
     ctgov_details as _ctgov_details,
+    ctis_recruiting_in,
     ctis_normalize as _ctis_normalize,
     ctis_parse_trial as _ctis_parse_trial,
     is_euct_id as _is_euct_id,
@@ -61,7 +63,7 @@ TRIAL_CACHE_FILE = os.path.join(BASE_DIR, "trial_cache.json")
 CACHE_TIMEOUT = 86400  # 24 h
 # Bump when the shape of the returned records changes, so cached responses
 # built with the old shape are not served.
-RECORD_VERSION = "v2"
+RECORD_VERSION = "v3"
 API_BASE_URL = "https://clinicaltrials.gov/api/v2/studies"
 SIMILARITY_THRESHOLD = 50
 
@@ -227,7 +229,7 @@ _CTIS_HEADERS  = {
 }
 
 _CTIS_STATUS_ALIASES: dict = {
-    "ongoing": [2, 3],   # Authorised + Ongoing
+    "ongoing": CTIS_MAY_BE_RECRUITING,  # filtered per country with ctis_recruiting_in
     "all":     [1, 2, 3, 4, 5, 6, 7, 8, 9],
 }
 
@@ -391,10 +393,11 @@ def _ctis_dedup(ctgov_results: list, ctis_parsed: list) -> list:
 @mcp.tool()
 def get_current_trials(disease: str, country: str) -> dict:
     """
-    Return clinical trials with RECRUITING status for *disease* that have at
-    least one active site in *country*.  Results include both ClinicalTrials.gov
-    and CTIS (euclinicaltrials.eu) trials; CTIS trials already registered on
-    ClinicalTrials.gov are not duplicated.
+    Return clinical trials currently recruiting for *disease* in *country*:
+    ClinicalTrials.gov trials with RECRUITING status and a site in *country*,
+    plus CTIS (euclinicaltrials.eu) trials whose recruitment is open in
+    *country* according to their trial events.  CTIS trials already
+    registered on ClinicalTrials.gov are not duplicated.
 
     Args:
         disease: Disease or condition name (e.g. "lung cancer").
@@ -408,9 +411,10 @@ def get_current_trials(disease: str, country: str) -> dict:
         EligibilityModule.  NCTId holds the EUCT number for CTIS trials.
         OverallStatus uses each registry's own vocabulary: ClinicalTrials.gov
         values (RECRUITING, COMPLETED, ...) or CTIS values (AUTHORISED, ENDED,
-        HALTED, ...).  CTIS does not say whether an authorised trial is
-        recruiting, so CTIS trials also carry RecruitmentStarted (true if
-        recruitment has started in at least one country) and "_source": "ctis".
+        HALTED, ...).  CTIS's overall status does not say whether an
+        authorised trial is recruiting, so CTIS trials also carry Recruiting
+        (true if recruitment is open in at least one country) and
+        "_source": "ctis".
     """
     endpoint = "current_trials"
     cached = _get_response_cache(endpoint, disease, country)
@@ -434,16 +438,13 @@ def get_current_trials(disease: str, country: str) -> dict:
         except Exception as exc:
             print(f"[get_current_trials] study processing error: {exc}")
 
-    # CTIS supplemental trials (status "ongoing" ≈ RECRUITING)
+    # CTIS supplemental trials recruiting in *country* (per-country trial events)
     try:
         ctis_parsed = _ctis_fetch_parsed(disease, "ongoing")
-        ctis_unique = _ctis_dedup(result, ctis_parsed)
-        country_iso = _CTIS_COUNTRY_TO_ISO.get(country)
-        if country_iso:
-            ctis_unique = [
-                t for t in ctis_unique
-                if any(s.get("country") == country_iso for s in t.get("sites", []))
-            ]
+        ctis_unique = [
+            t for t in _ctis_dedup(result, ctis_parsed)
+            if ctis_recruiting_in(t, country)
+        ]
         result.extend(_ctis_normalize(t) for t in ctis_unique)
     except Exception as exc:
         print(f"[get_current_trials] CTIS error: {exc}")

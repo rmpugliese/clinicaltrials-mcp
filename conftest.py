@@ -43,6 +43,15 @@ def ctis_raw():
         'ctStatus': 'Authorised',
         'ctPublicStatusCode': 4,
         'startDateEU': '2026-03-01',
+        'events': {'trialEvents': [
+            {'mscName': 'Italy', 'events': [
+                {'notificationType': 'START_OF_TRIAL', 'date': '2026-03-01'},
+                {'notificationType': 'START_OF_RECRUITMENT', 'date': '2026-03-27'},
+            ]},
+            {'mscName': 'Denmark', 'events': [
+                {'notificationType': 'START_OF_TRIAL', 'date': '2026-03-01'},
+            ]},
+        ]},
         'decisionDate': '2025-10-14T07:34:07.002',
         'authorizedApplication': {
             'authorizedPartI': {
@@ -95,7 +104,7 @@ def ctis_raw():
             'authorizedPartsII': [
                 {
                     'recruitmentSubjectCount': 20,
-                    'mscInfo': {'countryName': 'Italy', 'trialStatus': 'Authorised',
+                    'mscInfo': {'mscName': 'Italy', 'countryName': 'Italy', 'trialStatus': 'Authorised',
                                 'hasRecruitmentStarted': True,
                                 'activeTrialRecruitmentPeriod': {'recruitmentStartDate': '2026-03-27'}},
                     'trialSites': [{
@@ -109,7 +118,7 @@ def ctis_raw():
                 },
                 {
                     'recruitmentSubjectCount': 16,
-                    'mscInfo': {'countryName': 'Denmark', 'trialStatus': 'Authorised',
+                    'mscInfo': {'mscName': 'Denmark', 'countryName': 'Denmark', 'trialStatus': 'Authorised',
                                 'hasRecruitmentStarted': False},
                     'trialSites': [],
                 },

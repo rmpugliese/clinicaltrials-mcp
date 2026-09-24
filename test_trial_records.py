@@ -4,6 +4,7 @@ from trial_records import (
     ctgov_details,
     ctis_normalize,
     ctis_parse_trial,
+    ctis_recruiting_in,
     ctis_status_label,
     is_euct_id,
     is_nct_id,
@@ -86,11 +87,61 @@ class TestCtisParse:
     def test_status_and_recruitment(self, ctis_raw):
         parsed = ctis_parse_trial(ctis_raw)
         assert parsed['ctis_status'] == 'Authorised'
-        assert parsed['recruitment_started'] is True
+        assert parsed['recruiting'] is True
         by_country = {c['country']: c for c in parsed['country_status']}
+        assert by_country['Italy']['recruiting'] is True
+        assert by_country['Denmark']['recruiting'] is False
         assert by_country['Italy']['recruitment_started'] is True
-        assert by_country['Denmark']['recruitment_started'] is False
         assert by_country['Italy']['recruitment_start_date'] == '2026-03-27'
+
+    def test_recruiting_in_country(self, ctis_raw):
+        parsed = ctis_parse_trial(ctis_raw)
+        assert ctis_recruiting_in(parsed, 'Italy')
+        assert not ctis_recruiting_in(parsed, 'Denmark')
+        assert not ctis_recruiting_in(parsed, 'United States')
+
+
+class TestCtisRecruitingEvents:
+    """Per-country recruitment replayed from CTIS trial events."""
+
+    @staticmethod
+    def _italy(ctis_raw, events, status='Authorised', has_started=True):
+        ctis_raw['events']['trialEvents'][0]['events'] = [
+            {'notificationType': kind, 'date': date} for kind, date in events
+        ]
+        msc = ctis_raw['authorizedApplication']['authorizedPartsII'][0]['mscInfo']
+        msc['trialStatus'] = status
+        msc['hasRecruitmentStarted'] = has_started
+        return ctis_recruiting_in(ctis_parse_trial(ctis_raw), 'Italy')
+
+    def test_recruitment_ended(self, ctis_raw):
+        assert not self._italy(ctis_raw, [('START_OF_RECRUITMENT', '2025-01-01'),
+                                          ('END_OF_RECRUITMENT', '2026-01-01')])
+
+    def test_recruitment_restarted(self, ctis_raw):
+        assert self._italy(ctis_raw, [('START_OF_RECRUITMENT', '2025-01-01'),
+                                      ('END_OF_RECRUITMENT', '2025-06-01'),
+                                      ('RESTART_OF_RECRUITMENT', '2026-01-01')])
+
+    def test_events_are_replayed_in_date_order(self, ctis_raw):
+        assert not self._italy(ctis_raw, [('END_OF_RECRUITMENT', '2026-01-01'),
+                                          ('START_OF_RECRUITMENT', '2025-01-01')])
+
+    def test_temporary_halt_and_restart(self, ctis_raw):
+        halted = [('START_OF_RECRUITMENT', '2025-01-01'), ('TEMPORARY_HALT', '2025-06-01')]
+        assert not self._italy(ctis_raw, halted)
+        assert self._italy(ctis_raw, halted + [('RESTART_OF_TRIAL', '2025-09-01')])
+
+    def test_early_termination(self, ctis_raw):
+        assert not self._italy(ctis_raw, [('START_OF_RECRUITMENT', '2025-01-01'),
+                                          ('EARLY_TERMINATION', '2025-06-01')])
+
+    def test_country_not_authorised(self, ctis_raw):
+        assert not self._italy(ctis_raw, [('START_OF_RECRUITMENT', '2025-01-01')], status='Ended')
+
+    def test_without_events_falls_back_to_started_flag(self, ctis_raw):
+        assert self._italy(ctis_raw, [], has_started=True)
+        assert not self._italy(ctis_raw, [], has_started=False)
 
     def test_overview_supplies_phase_age_and_enrollment(self, ctis_raw, ctis_overview):
         parsed = ctis_parse_trial(ctis_raw, ctis_overview)
@@ -112,7 +163,7 @@ class TestCtisParse:
         parsed = ctis_parse_trial({'ctNumber': '2025-500002-22-00', 'ctPublicStatusCode': 8})
         assert parsed['ctis_status'] == 'Ended'
         assert 'sites' not in parsed
-        assert 'recruitment_started' not in parsed
+        assert 'recruiting' not in parsed
 
     def test_status_label_from_code(self):
         assert ctis_status_label({}, {'ctStatus': 6}) == 'Halted'
@@ -134,7 +185,7 @@ class TestCtisNormalize:
         assert record['Registry'] == REGISTRY_CTIS
         assert record['_source'] == 'ctis'
         assert record['OverallStatus'] == 'AUTHORISED'
-        assert record['RecruitmentStarted'] is True
+        assert record['Recruiting'] is True
         assert record['BriefTitle'] == 'A study of examplinib in newly diagnosed glioblastoma'
         assert record['LeadSponsor'] == 'Example Hospital Trust'
         assert record['EnrollmentCount'] == 36

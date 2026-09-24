@@ -16,7 +16,9 @@ from typing import Optional
 
 from trial_records import (
     CTIS_COUNTRY_TO_ISO as _CTIS_COUNTRY_TO_ISO,
+    CTIS_MAY_BE_RECRUITING,
     ctgov_details,
+    ctis_recruiting_in,
     ctis_normalize as _ctis_normalize,
     ctis_parse_trial as _ctis_parse_trial,
     is_euct_id as _is_euct_id,
@@ -39,7 +41,7 @@ TRIAL_CACHE_FILE = 'trial_cache.json'  # Cache for single ClinicalTrials.gov stu
 CACHE_TIMEOUT = 86400  # Cache expiry time in seconds (24 hours)
 # Bump when the shape of the returned records changes, so cached responses
 # built with the old shape are not served.
-RECORD_VERSION = 'v2'
+RECORD_VERSION = 'v3'
 
 # Load caches if they exist
 if os.path.exists(API_CACHE_FILE):
@@ -189,7 +191,7 @@ _CTIS_HEADERS  = {
 }
 
 _CTIS_STATUS_ALIASES: dict = {
-    "ongoing": [2, 3],   # Authorised + Ongoing
+    "ongoing": CTIS_MAY_BE_RECRUITING,  # filtered per country with ctis_recruiting_in
     "all":     [1, 2, 3, 4, 5, 6, 7, 8, 9],
 }
 
@@ -383,16 +385,13 @@ def current_trials():
         except Exception as e:
             print(f"Error processing study {study}: {e}")
 
-    # CTIS supplemental trials (status "ongoing" ≈ RECRUITING)
+    # CTIS supplemental trials recruiting in *country* (per-country trial events)
     try:
         ctis_parsed = _ctis_fetch_parsed(disease, "ongoing")
-        ctis_unique = _ctis_dedup(current_trials_list, ctis_parsed)
-        country_iso = _CTIS_COUNTRY_TO_ISO.get(country)
-        if country_iso:
-            ctis_unique = [
-                t for t in ctis_unique
-                if any(s.get("country") == country_iso for s in t.get("sites", []))
-            ]
+        ctis_unique = [
+            t for t in _ctis_dedup(current_trials_list, ctis_parsed)
+            if ctis_recruiting_in(t, country)
+        ]
         current_trials_list.extend(_ctis_normalize(t) for t in ctis_unique)
     except Exception as e:
         print(f"[CTIS] current_trials error: {e}")

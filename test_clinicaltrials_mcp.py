@@ -38,7 +38,7 @@ class TestGetAllTrials:
         assert by_id['NCT11111111']['Registry'] == 'clinicaltrials.gov'
         assert by_id['2025-500001-11-00']['OverallStatus'] == 'AUTHORISED'
         assert by_id['2025-500001-11-00']['Registry'] == 'ctis'
-        assert by_id['2025-500001-11-00']['RecruitmentStarted'] is True
+        assert by_id['2025-500001-11-00']['Recruiting'] is True
 
     def test_ctis_trials_pass_the_country_filter(self, ctgov_study, ctis_raw):
         ctis_parsed = [mcp_server._ctis_parse_trial(ctis_raw)]
@@ -54,6 +54,25 @@ class TestGetAllTrials:
     def test_response_cache_key_is_versioned(self):
         assert mcp_server._response_key('all_trials', 'glioblastoma', 'None') != \
             mcp_server.hashlib.md5(b'all_trials_glioblastoma_None').hexdigest()
+
+
+class TestGetCurrentTrials:
+
+    def test_ctis_trials_recruiting_in_the_country(self, ctgov_study, ctis_raw):
+        ctis_parsed = [mcp_server._ctis_parse_trial(ctis_raw)]
+        results = {}
+        with patch.object(mcp_server, '_fetch_trials', return_value={'studies': [ctgov_study]}), \
+             patch.object(mcp_server, '_ctis_fetch_parsed', return_value=ctis_parsed) as fetch:
+            for country in ('Italy', 'Denmark', 'United States'):
+                results[country] = {t['NCTId'] for t in mcp_server.get_current_trials('glioblastoma', country)['trials']}
+
+        assert fetch.call_args[0][1] == 'ongoing'
+        assert results['Italy'] == {'NCT11111111', '2025-500001-11-00'}
+        assert results['Denmark'] == set()          # authorised there, recruitment not started
+        assert results['United States'] == set()    # outside CTIS: previously got every CTIS trial
+
+    def test_ongoing_searches_codes_that_may_be_recruiting(self):
+        assert mcp_server._CTIS_STATUS_ALIASES['ongoing'] == [3, 4, 5]
 
 
 class TestGetTrialNct:
