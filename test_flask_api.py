@@ -4,18 +4,30 @@ Interactive test client for Clinical Trials Flask REST API.
 Usage:
     Local:  python test_flask_api.py
     Remote: python test_flask_api.py --host 167.86.115.64 --port 5000
+
+The API key defaults to the first key in ALLOWED_API_KEYS (.env).
 """
 
 import argparse
 import json
+import os
+import sys
+
 import requests
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+DEFAULT_API_KEY = next((k.strip() for k in os.getenv("ALLOWED_API_KEYS", "").split(",") if k.strip()), None)
 
 parser = argparse.ArgumentParser(description="Flask REST API interactive test client")
 parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
 parser.add_argument("--port", type=int, default=5000, help="Server port (default: 5000)")
-parser.add_argument("--api-key", default="<removed>", help="API key for x-api-key header")
+parser.add_argument("--api-key", default=DEFAULT_API_KEY,
+                    help="API key for x-api-key header (default: first key in ALLOWED_API_KEYS from .env)")
 parser.add_argument("--https", action="store_true", help="Use HTTPS instead of HTTP")
 args = parser.parse_args()
+if not args.api_key:
+    sys.exit("No API key: pass --api-key or set ALLOWED_API_KEYS in .env")
 
 scheme = "https" if args.https else "http"
 BASE_URL = f"{scheme}://{args.host}:{args.port}"
@@ -62,6 +74,15 @@ ENDPOINTS_CONFIG = {
         ]
     },
     "5": {
+        "name": "trial",
+        "method": "GET",
+        "path": "/trial/{trial_id}",
+        "description": "One trial in full by NCT or EUCT ID",
+        "params": [
+            {"name": "trial_id", "prompt": "Trial ID (e.g., NCT07284069 or 2025-522605-37-00): "},
+        ]
+    },
+    "6": {
         "name": "check_eligibility",
         "method": "POST",
         "path": "/check_eligibility",
@@ -111,6 +132,8 @@ def display_results(data, endpoint_name):
         print(f"\nFound {len(trials)} trials:\n")
         for i, trial in enumerate(trials[:5], 1):
             print(f"{i}. [{trial.get('NCTId')}] {trial.get('BriefTitle', 'N/A')[:60]}...")
+            print(f"   Registry: {trial.get('Registry')} | Status: {trial.get('OverallStatus')}"
+                  + (f" | Recruiting: {trial.get('Recruiting')}" if 'Recruiting' in trial else ""))
             print(f"   Type: {trial.get('StudyType')} | Phases: {trial.get('Phases')}")
             print(f"   URL: {trial.get('StudyUrl')}")
             print()
@@ -136,6 +159,9 @@ def display_results(data, endpoint_name):
             print()
         if len(treatments) > 10:
             print(f"   ... and {len(treatments) - 10} more treatments")
+
+    elif endpoint_name == "trial":
+        print_trial_detail(data.get("trial", {}))
 
     elif endpoint_name == "check_eligibility":
         print(f"\nTrial: {data.get('nctId')}")
@@ -166,8 +192,27 @@ def display_results(data, endpoint_name):
         print(json.dumps(data, indent=2)[:1000])
 
 
+def print_trial_detail(trial):
+    """Print the main fields of one trial from get_trial."""
+    print(f"\n{'[' + str(trial.get('NCTId')) + ']'} {trial.get('BriefTitle', 'N/A')}")
+    print(f"   Registry: {trial.get('Registry')} | Status: {trial.get('OverallStatus')}"
+          + (f" | Recruiting: {trial.get('Recruiting')}" if 'Recruiting' in trial else ""))
+    print(f"   Sponsor: {trial.get('LeadSponsor')} | Enrollment: {trial.get('EnrollmentCount')}")
+    print(f"   Start: {trial.get('StartDate')} | Completion: {trial.get('CompletionDate')}")
+    print(f"   Type: {trial.get('StudyType')} | Phases: {trial.get('Phases')}")
+    print(f"   Interventions: {trial.get('InterventionName')}")
+    print(f"   Locations: {len(trial.get('Locations', []))} | URL: {trial.get('StudyUrl')}")
+    criteria = trial.get('EligibilityModule', {}).get('eligibilityCriteria') or ''
+    if criteria:
+        print(f"\n   Eligibility criteria:\n   {criteria[:800]}" + ("..." if len(criteria) > 800 else ""))
+    print(f"\n   Details: {', '.join(sorted(trial.get('Details', {})))}")
+
+
 def call_endpoint(endpoint_config, arguments):
-    url = BASE_URL + endpoint_config["path"]
+    path = endpoint_config["path"]
+    if "{trial_id}" in path:
+        path = path.format(trial_id=arguments.pop("trial_id", ""))
+    url = BASE_URL + path
     headers = {"x-api-key": API_KEY}
 
     if endpoint_config["method"] == "GET":
@@ -198,7 +243,7 @@ def interactive_session():
 
     while True:
         print_menu()
-        choice = input("\nSelect endpoint [0-5]: ").strip()
+        choice = input(f"\nSelect endpoint [0-{len(ENDPOINTS_CONFIG)}]: ").strip()
 
         if choice == "0":
             print("\nGoodbye!\n")

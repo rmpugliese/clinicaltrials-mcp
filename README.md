@@ -230,6 +230,8 @@ python test_mcp_sse.py --host localhost --port 8080 --token <key>
 python test_mcp_sse.py --host mcp.example.com --port 443 --token <key> --https
 ```
 
+Both scripts default to the first key in `ALLOWED_API_KEYS` from `.env`, so `--api-key` / `--token` can be omitted locally.
+
 ## Dependencies
 
 - `flask` — REST API
