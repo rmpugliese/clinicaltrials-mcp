@@ -51,6 +51,11 @@ class TestSettings:
         monkeypatch.setenv('OPENAI_API_KEY', '')
         assert llm.make_client().api_key == 'not-needed'
 
+    def test_openai_key_never_sent_to_other_provider(self, monkeypatch):
+        monkeypatch.setenv('LLM_BASE_URL', 'https://llm.example.org/v1')
+        monkeypatch.setenv('OPENAI_API_KEY', 'openai-key')
+        assert llm.make_client().api_key == 'not-needed'
+
 
 class TestParseJsonAnswer:
 

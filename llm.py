@@ -5,7 +5,7 @@ Any OpenAI-compatible service (OpenAI, vLLM, Ollama, LM Studio, LiteLLM, ...)
 configured in .env with the same variables chatbotgbm uses:
 
   LLM_BASE_URL          e.g. https://llm.example.org/v1  (empty: OpenAI)
-  LLM_API_KEY           falls back to OPENAI_API_KEY
+  LLM_API_KEY           falls back to OPENAI_API_KEY only when LLM_BASE_URL is empty
   LLM_MODEL             default: o3-mini
   LLM_REASONING_EFFORT  sent only when set; default "medium" on OpenAI
 
@@ -31,9 +31,11 @@ def model() -> str:
 
 
 def make_client() -> OpenAI:
-    api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if not api_key and base_url():
-        api_key = "not-needed"  # local servers such as Ollama accept any key
+    if base_url():
+        # Never send the OpenAI key to another provider; local servers such as Ollama accept any key
+        api_key = os.getenv("LLM_API_KEY") or "not-needed"
+    else:
+        api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     return OpenAI(api_key=api_key, base_url=base_url())
 
 

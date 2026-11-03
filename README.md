@@ -64,7 +64,7 @@ LLM_MODEL=model-name
 # LLM_REASONING_EFFORT=medium   # only for reasoning models that accept it
 ```
 
-Without `LLM_BASE_URL` it uses OpenAI `o3-mini` with `OPENAI_API_KEY`. Answers wrapped in ```` ```json ```` fences or `<think>` blocks are accepted.
+Without `LLM_BASE_URL` it uses OpenAI `o3-mini` with `OPENAI_API_KEY`. With `LLM_BASE_URL` set, only that endpoint is called (no fallback to OpenAI) and `OPENAI_API_KEY` is never sent to it. Answers wrapped in ```` ```json ```` fences or `<think>` blocks are accepted.
 
 Generate a new API key:
 ```bash
