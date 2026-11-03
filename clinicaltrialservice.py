@@ -11,8 +11,9 @@ from dotenv import load_dotenv
 from io import StringIO
 import argparse
 import openai  # This line is required to use the openai module
-from openai import OpenAI
 from typing import Optional
+
+import llm
 
 from trial_records import (
     CTIS_COUNTRY_TO_ISO as _CTIS_COUNTRY_TO_ISO,
@@ -29,7 +30,7 @@ from trial_records import (
 # Load environment variables
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # Import ChatCompletion directly per migration guidelines
+client = llm.make_client()  # OpenAI-compatible endpoint from LLM_* in .env (default: OpenAI o3-mini)
 
 app = Flask(__name__)
 
@@ -790,7 +791,7 @@ def check_eligibility():
         brief_summary = trial.get('protocolSection', {}).get('descriptionModule', {}).get('briefSummary', '')
         inclusion_criteria, exclusion_criteria = split_eligibility_criteria(criteria_text)
 
-    # ── Common prompt and OpenAI call ────────────────────────────────────────
+    # ── Common prompt and LLM call ───────────────────────────────────────────
     prompt = (
         f"PATIENT INFORMATION:\n{patient_info}\n\n"
         f"TRIAL SUMMARY:\n{brief_summary}\n\n"
@@ -816,9 +817,7 @@ def check_eligibility():
 
     try:
         response = client.chat.completions.create(
-            model="o3-mini",
-            reasoning_effort="medium",
-            response_format={"type": "json_object"},
+            **llm.request_params(),
             messages=[
                 {
                     "role": "system",
@@ -835,15 +834,15 @@ def check_eligibility():
         )
         answer = response.choices[0].message.content
     except Exception as e:
-        return jsonify({'error': f'Error calling OpenAI API: {str(e)}'}), 500
+        return jsonify({'error': f'Error calling LLM API: {str(e)}'}), 500
 
     try:
-        eligibility_result = json.loads(answer)
+        eligibility_result = llm.parse_json_answer(answer)
         if 'result' not in eligibility_result or 'explanation' not in eligibility_result:
             raise ValueError("Missing expected keys")
     except Exception as e:
         return jsonify({
-            'error': 'Failed to parse OpenAI response into JSON. Raw response:',
+            'error': 'Failed to parse LLM response into JSON. Raw response:',
             'raw_response': answer,
             'parse_error': str(e)
         }), 500

@@ -469,7 +469,7 @@ class TestCheckEligibilityEndpoint:
             )
 
             assert response.status_code == 500
-            assert 'OpenAI API' in response.json['error']
+            assert 'LLM API' in response.json['error']
 
     def test_check_eligibility_invalid_json_response(self, client, valid_api_key, mock_trial_data):
         """Test eligibility check with invalid JSON from OpenAI."""

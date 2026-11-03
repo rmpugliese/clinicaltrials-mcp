@@ -55,6 +55,17 @@ ALLOWED_API_KEYS=your-api-key-here,optional-second-key
 OPENAI_API_KEY=sk-...
 ```
 
+`check_eligibility` can use any OpenAI-compatible LLM endpoint (vLLM, Ollama, LM Studio, LiteLLM, a European provider, ...) instead of OpenAI:
+
+```env
+LLM_BASE_URL=https://llm.example.org/v1
+LLM_API_KEY=...
+LLM_MODEL=model-name
+# LLM_REASONING_EFFORT=medium   # only for reasoning models that accept it
+```
+
+Without `LLM_BASE_URL` it uses OpenAI `o3-mini` with `OPENAI_API_KEY`. Answers wrapped in ```` ```json ```` fences or `<think>` blocks are accepted.
+
 Generate a new API key:
 ```bash
 python gen_new_api_key.py
@@ -213,7 +224,7 @@ Authorization: Bearer <your-api-key>
 
 Unit tests (no server, no network, no `.env` required):
 ```bash
-pytest test_clinicaltrialservice.py test_clinicaltrials_mcp.py test_trial_records.py -v
+pytest test_clinicaltrialservice.py test_clinicaltrials_mcp.py test_trial_records.py test_llm.py -v
 ```
 
 Interactive test against a running Flask server:

@@ -7,7 +7,7 @@ Exposes ClinicalTrials.gov and CTIS (euclinicaltrials.eu) data as MCP tools:
   - get_specialized_centers : treatment centres ranked by trial count
   - get_available_treatments: interventions from interventional studies
   - get_trial               : one trial in full, by NCT or EUCT ID
-  - check_eligibility       : AI-powered eligibility check via OpenAI
+  - check_eligibility       : AI-powered eligibility check via the LLM in .env
 
 Both ClinicalTrials.gov (NCT IDs) and CTIS (EUCT IDs like 2023-505701-14-00)
 are queried. CTIS results are deduplicated against CT.gov using the nct_number
@@ -35,8 +35,7 @@ import requests
 from dotenv import load_dotenv
 from fuzzywuzzy import fuzz
 from mcp.server.fastmcp import FastMCP
-from openai import OpenAI
-
+import llm
 from trial_records import (
     CTIS_COUNTRY_TO_ISO as _CTIS_COUNTRY_TO_ISO,
     CTIS_MAY_BE_RECRUITING,
@@ -73,7 +72,8 @@ ALLOWED_BEARER_TOKENS = [
     if token.strip()
 ]
 
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# OpenAI-compatible endpoint from LLM_* in .env (default: OpenAI o3-mini)
+openai_client = llm.make_client()
 
 mcp = FastMCP("Clinical Trials")
 
@@ -767,8 +767,9 @@ def _split_eligibility_criteria(criteria_text: str) -> tuple[str, str]:
 @mcp.tool()
 def check_eligibility(nct_id: str, disease: str, patient_info: str) -> dict:
     """
-    Use OpenAI o3-mini to evaluate whether a patient is eligible for a
-    specific clinical trial.
+    Use the LLM configured in .env (LLM_BASE_URL / LLM_MODEL; default OpenAI
+    o3-mini) to evaluate whether a patient is eligible for a specific
+    clinical trial.
 
     Args:
         nct_id: NCT identifier (e.g. "NCT04512345") for ClinicalTrials.gov trials,
@@ -833,7 +834,7 @@ def check_eligibility(nct_id: str, disease: str, patient_info: str) -> dict:
         brief_summary  = ps.get("descriptionModule", {}).get("briefSummary", "")
         inclusion_criteria, exclusion_criteria = _split_eligibility_criteria(criteria_text)
 
-    # ── Common prompt and OpenAI call ────────────────────────────────────────
+    # ── Common prompt and LLM call ───────────────────────────────────────────
     prompt = (
         f"PATIENT INFORMATION:\n{patient_info}\n\n"
         f"TRIAL SUMMARY:\n{brief_summary}\n\n"
@@ -859,9 +860,7 @@ def check_eligibility(nct_id: str, disease: str, patient_info: str) -> dict:
 
     try:
         response = openai_client.chat.completions.create(
-            model="o3-mini",
-            reasoning_effort="medium",
-            response_format={"type": "json_object"},
+            **llm.request_params(),
             messages=[
                 {
                     "role": "system",
@@ -878,15 +877,15 @@ def check_eligibility(nct_id: str, disease: str, patient_info: str) -> dict:
         )
         answer = response.choices[0].message.content
     except Exception as exc:
-        return {"error": f"OpenAI API error: {exc}"}
+        return {"error": f"LLM API error: {exc}"}
 
     try:
-        eligibility_result = json.loads(answer)
+        eligibility_result = llm.parse_json_answer(answer)
         if "result" not in eligibility_result or "explanation" not in eligibility_result:
-            raise ValueError("Missing expected keys in OpenAI response")
+            raise ValueError("Missing expected keys in LLM response")
     except Exception as exc:
         return {
-            "error": "Failed to parse OpenAI response",
+            "error": "Failed to parse LLM response",
             "raw_response": answer,
             "parse_error": str(exc),
         }
