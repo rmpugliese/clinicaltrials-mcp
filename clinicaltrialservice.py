@@ -852,5 +852,9 @@ def check_eligibility():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run the clinical trial service Flask app.")
     parser.add_argument('--port', type=int, default=5000, help="Port to run the server on (default: 5000)")
+    parser.add_argument('--host', default='127.0.0.1',
+                        help="Address to bind to (default: 127.0.0.1, reachable only through the reverse proxy)")
+    parser.add_argument('--debug', action='store_true',
+                        help="Flask debug mode with reloader and interactive debugger: local development only")
     args = parser.parse_args()
-    app.run(host='0.0.0.0', port=args.port, debug=True)
+    app.run(host=args.host, port=args.port, debug=args.debug)

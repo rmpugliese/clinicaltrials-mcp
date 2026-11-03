@@ -79,6 +79,8 @@ python gen_new_api_key.py
 python clinicaltrialservice.py --port 5000
 ```
 
+It listens on `127.0.0.1` only, behind the reverse proxy. `--host 0.0.0.0` exposes it on the network; `--debug` turns on the Flask reloader and interactive debugger, for local development only.
+
 ### MCP Server — stdio (local clients)
 
 ```bash

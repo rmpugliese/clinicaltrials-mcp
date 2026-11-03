@@ -903,7 +903,7 @@ def _create_authenticated_sse_app(host: str, port: int):
     from starlette.applications import Starlette
     from starlette.middleware import Middleware
     from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, Response
     from starlette.routing import Route, Mount
     from mcp.server.sse import SseServerTransport
 
@@ -946,6 +946,9 @@ def _create_authenticated_sse_app(host: str, port: int):
             await mcp._mcp_server.run(
                 streams[0], streams[1], mcp._mcp_server.create_initialization_options()
             )
+        # The SSE response was already sent by connect_sse; without a return value
+        # Starlette raises "'NoneType' object is not callable" when the client disconnects
+        return Response()
 
     app = Starlette(
         routes=[
