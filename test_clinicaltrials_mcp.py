@@ -51,6 +51,29 @@ class TestGetAllTrials:
         assert '2025-500001-11-00' in {t['NCTId'] for t in italy}
         assert '2025-500001-11-00' not in {t['NCTId'] for t in france}
 
+    def test_all_statuses(self, ctgov_study):
+        withdrawn = {'protocolSection': {
+            'identificationModule': {'nctId': 'NCT33333333'},
+            'statusModule': {'overallStatus': 'WITHDRAWN', 'whyStopped': 'No funding'},
+        }}
+        mcp_server.requests.get = MagicMock(return_value=_response(200, {'studies': [ctgov_study, withdrawn]}))
+        with patch.object(mcp_server, '_ctis_fetch_parsed', return_value=[]):
+            default = mcp_server.get_all_trials('glioblastoma')['trials']
+            every = mcp_server.get_all_trials('glioblastoma', all_statuses=True)['trials']
+
+        assert [t['NCTId'] for t in default] == ['NCT11111111']
+        assert [t['NCTId'] for t in every] == ['NCT11111111', 'NCT33333333']
+        assert every[1]['WhyStopped'] == 'No funding'
+        # One download, without a status filter, serves both
+        mcp_server.requests.get.assert_called_once()
+        assert 'filter.overallStatus' not in mcp_server.requests.get.call_args.kwargs['params']
+
+    def test_api_cache_from_before_all_statuses_is_not_reused(self, ctgov_study):
+        old_key = mcp_server.hashlib.md5(b'glioblastoma').hexdigest()
+        mcp_server.api_cache[old_key] = {'timestamp': datetime.now().timestamp(), 'data': {'studies': []}}
+        mcp_server.requests.get = MagicMock(return_value=_response(200, {'studies': [ctgov_study]}))
+        assert len(mcp_server._fetch_trials('glioblastoma')['studies']) == 1
+
     def test_response_cache_key_is_versioned(self):
         assert mcp_server._response_key('all_trials', 'glioblastoma', 'None') != \
             mcp_server.hashlib.md5(b'all_trials_glioblastoma_None').hexdigest()
@@ -84,6 +107,14 @@ class TestGetTrialNct:
         assert trial['OverallStatus'] == 'RECRUITING'
         assert trial['Details']['protocolSection']['outcomesModule']
         mcp_server.requests.get.assert_not_called()
+
+    def test_posted_results_are_returned(self, ctgov_study):
+        results = {'outcomeMeasuresModule': {'outcomeMeasures': [{'title': 'Overall survival'}]}}
+        study = {**ctgov_study, 'hasResults': True, 'resultsSection': results}
+        mcp_server.requests.get = MagicMock(return_value=_response(200, study))
+        trial = mcp_server.get_trial('NCT11111111')['trial']
+        assert trial['HasResults'] is True
+        assert trial['Details']['resultsSection'] == results
 
     def test_downloaded_when_not_cached(self, ctgov_study):
         mcp_server.requests.get = MagicMock(return_value=_response(200, ctgov_study))

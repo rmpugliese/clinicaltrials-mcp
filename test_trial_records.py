@@ -1,6 +1,7 @@
 from trial_records import (
     REGISTRY_CTGOV,
     REGISTRY_CTIS,
+    ctgov_default_status,
     ctgov_details,
     ctis_normalize,
     ctis_parse_trial,
@@ -17,7 +18,8 @@ EXISTING_FIELDS = {
     'NCTId', 'BriefTitle', 'StudyUrl', 'BriefSummary', 'InterventionType', 'InterventionName',
     'CompletionDate', 'Locations', 'Phases', 'StudyType', 'EligibilityModule',
 }
-NEW_FIELDS = {'Registry', 'OverallStatus', 'StartDate', 'LeadSponsor', 'EnrollmentCount'}
+NEW_FIELDS = {'Registry', 'OverallStatus', 'StartDate', 'LeadSponsor', 'EnrollmentCount',
+              'WhyStopped', 'HasResults'}
 
 
 class TestIds:
@@ -44,6 +46,16 @@ class TestCtgov:
         assert record['LeadSponsor'] == 'Example University'
         assert record['EnrollmentCount'] == 60
         assert record['StudyUrl'] == 'https://clinicaltrials.gov/study/NCT11111111'
+        assert record['WhyStopped'] is None
+        assert record['HasResults'] is False
+
+    def test_simplify_stopped_trial_with_results(self, ctgov_study):
+        ctgov_study['protocolSection']['statusModule'].update(
+            overallStatus='TERMINATED', whyStopped='Slow accrual')
+        ctgov_study['hasResults'] = True
+        record = simplify_ctgov(ctgov_study)
+        assert record['WhyStopped'] == 'Slow accrual'
+        assert record['HasResults'] is True
 
     def test_simplify_tolerates_missing_modules(self):
         record = simplify_ctgov({'protocolSection': {'identificationModule': {'nctId': 'NCT1'}}})
@@ -55,6 +67,19 @@ class TestCtgov:
         details = ctgov_details(ctgov_study)
         assert details['protocolSection']['outcomesModule']['primaryOutcomes'][0]['measure'] == 'Overall survival'
         assert details['hasResults'] is False
+        assert details['resultsSection'] is None
+
+    def test_details_carry_posted_results(self, ctgov_study):
+        results = {'outcomeMeasuresModule': {'outcomeMeasures': [{'title': 'Overall survival'}]}}
+        details = ctgov_details({**ctgov_study, 'hasResults': True, 'resultsSection': results})
+        assert details['hasResults'] is True
+        assert details['resultsSection'] == results
+
+    def test_default_status(self, ctgov_study):
+        assert ctgov_default_status(ctgov_study)
+        ctgov_study['protocolSection']['statusModule']['overallStatus'] = 'WITHDRAWN'
+        assert not ctgov_default_status(ctgov_study)
+        assert not ctgov_default_status({})
 
 
 class TestCtisParse:
@@ -186,6 +211,8 @@ class TestCtisNormalize:
         assert record['_source'] == 'ctis'
         assert record['OverallStatus'] == 'AUTHORISED'
         assert record['Recruiting'] is True
+        assert record['WhyStopped'] is None
+        assert record['HasResults'] is None
         assert record['BriefTitle'] == 'A study of examplinib in newly diagnosed glioblastoma'
         assert record['LeadSponsor'] == 'Example Hospital Trust'
         assert record['EnrollmentCount'] == 36

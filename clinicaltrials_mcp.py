@@ -39,6 +39,7 @@ import llm
 from trial_records import (
     CTIS_COUNTRY_TO_ISO as _CTIS_COUNTRY_TO_ISO,
     CTIS_MAY_BE_RECRUITING,
+    ctgov_default_status as _ctgov_default_status,
     ctgov_details as _ctgov_details,
     ctis_recruiting_in,
     ctis_normalize as _ctis_normalize,
@@ -62,7 +63,7 @@ TRIAL_CACHE_FILE = os.path.join(BASE_DIR, "trial_cache.json")
 CACHE_TIMEOUT = 86400  # 24 h
 # Bump when the shape of the returned records changes, so cached responses
 # built with the old shape are not served.
-RECORD_VERSION = "v3"
+RECORD_VERSION = "v4"
 API_BASE_URL = "https://clinicaltrials.gov/api/v2/studies"
 SIMILARITY_THRESHOLD = 50
 
@@ -103,7 +104,8 @@ trial_cache: dict = _load_json(TRIAL_CACHE_FILE)
 
 
 def _api_key(disease: str) -> str:
-    return hashlib.md5(disease.encode()).hexdigest()
+    # Entries keyed on the bare disease hold only the default statuses: not reused
+    return hashlib.md5(f"all_statuses_{disease}".encode()).hexdigest()
 
 
 def _response_key(endpoint: str, disease: str, country: str) -> str:
@@ -147,40 +149,38 @@ def _set_response_cache(endpoint: str, disease: str, country: str, data: list) -
 # ClinicalTrials.gov fetch
 # ---------------------------------------------------------------------------
 
-def _fetch_trials(disease: str) -> Optional[dict]:
-    """Return {'studies': [...]} for *disease*, using cache when available."""
-    cached = _get_api_cache(disease)
-    if cached:
-        return cached
+def _fetch_trials(disease: str, all_statuses: bool = False) -> Optional[dict]:
+    """
+    Return {'studies': [...]} for *disease*, using cache when available.
+    Studies of every status are downloaded and cached; unless *all_statuses*,
+    only those with one of CTGOV_DEFAULT_STATUSES are returned.
+    """
+    result = _get_api_cache(disease)
+    if not result:
+        all_studies = []
+        page_token = None
 
-    all_studies = []
-    page_token = None
+        while True:
+            params = {"query.cond": disease, "pageSize": 512}
+            if page_token:
+                params["pageToken"] = page_token
 
-    while True:
-        params = {
-            "query.cond": disease,
-            "filter.overallStatus": (
-                "ACTIVE_NOT_RECRUITING,COMPLETED,ENROLLING_BY_INVITATION,"
-                "NOT_YET_RECRUITING,RECRUITING,APPROVED_FOR_MARKETING"
-            ),
-            "pageSize": 512,
-        }
-        if page_token:
-            params["pageToken"] = page_token
+            resp = requests.get(API_BASE_URL, params=params, timeout=30)
+            if resp.status_code != 200:
+                return None
 
-        resp = requests.get(API_BASE_URL, params=params, timeout=30)
-        if resp.status_code != 200:
-            return None
+            data = resp.json()
+            all_studies.extend(data.get("studies", []))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
 
-        data = resp.json()
-        all_studies.extend(data.get("studies", []))
-        page_token = data.get("nextPageToken")
-        if not page_token:
-            break
+        result = {"studies": all_studies}
+        _set_api_cache(disease, result)
 
-    result = {"studies": all_studies}
-    _set_api_cache(disease, result)
-    return result
+    if all_statuses:
+        return result
+    return {"studies": [s for s in result["studies"] if _ctgov_default_status(s)]}
 
 
 def _fetch_study(nct_id: str) -> tuple[Optional[dict], Optional[str]]:
@@ -406,9 +406,12 @@ def get_current_trials(disease: str, country: str) -> dict:
     Returns:
         {"trials": [...]} where each trial contains NCTId, Registry
         ("clinicaltrials.gov" or "ctis"), BriefTitle, StudyUrl, BriefSummary,
-        OverallStatus, StartDate, CompletionDate, LeadSponsor, EnrollmentCount,
-        InterventionType, InterventionName, Locations, Phases, StudyType,
-        EligibilityModule.  NCTId holds the EUCT number for CTIS trials.
+        OverallStatus, WhyStopped, HasResults, StartDate, CompletionDate,
+        LeadSponsor, EnrollmentCount, InterventionType, InterventionName,
+        Locations, Phases, StudyType, EligibilityModule.  NCTId holds the
+        EUCT number for CTIS trials.  WhyStopped is the registry's reason for
+        stopping a trial early; HasResults is true when results are posted on
+        ClinicalTrials.gov (get_trial returns them).  Both are null for CTIS.
         OverallStatus uses each registry's own vocabulary: ClinicalTrials.gov
         values (RECRUITING, COMPLETED, ...) or CTIS values (AUTHORISED, ENDED,
         HALTED, ...).  CTIS's overall status does not say whether an
@@ -454,26 +457,33 @@ def get_current_trials(disease: str, country: str) -> dict:
 
 
 @mcp.tool()
-def get_all_trials(disease: str, country: Optional[str] = None) -> dict:
+def get_all_trials(disease: str, country: Optional[str] = None,
+                   all_statuses: bool = False) -> dict:
     """
-    Return all trials (any status) for *disease*, optionally filtered by
-    *country*.  Results include both ClinicalTrials.gov and CTIS trials;
-    CTIS trials already on ClinicalTrials.gov are not duplicated.
+    Return all trials for *disease*, optionally filtered by *country*.
+    Results include both ClinicalTrials.gov and CTIS trials; CTIS trials
+    already on ClinicalTrials.gov are not duplicated.
 
     Args:
         disease: Disease or condition name (e.g. "breast cancer").
         country: Optional country filter. If omitted, all countries are returned.
+        all_statuses: If false (default), ClinicalTrials.gov trials that were
+            withdrawn, terminated, suspended, of unknown status or expanded
+            access are left out.  If true, every status is returned: use it to
+            study trials that stopped early (see WhyStopped).  CTIS trials are
+            the same either way: every status except revoked and not
+            authorised.
 
     Returns:
         {"trials": [...]} — same structure as get_current_trials.
     """
-    endpoint = "all_trials"
+    endpoint = "all_trials_all_statuses" if all_statuses else "all_trials"
     cache_country = country or "None"
     cached = _get_response_cache(endpoint, disease, cache_country)
     if cached:
         return {"trials": cached}
 
-    trial_data = _fetch_trials(disease)
+    trial_data = _fetch_trials(disease, all_statuses)
     if not trial_data:
         return {"error": "No data found for the requested disease"}
 
@@ -725,8 +735,9 @@ def get_trial(trial_id: str) -> dict:
         {"trial": {...}} with the same fields as get_all_trials plus "Details":
           - ClinicalTrials.gov: {"protocolSection": <the registry's full
             protocol: eligibility, arms, outcomes, locations with status and
-            contacts, ...>, "hasResults": bool}.  Posted results are not
-            included.
+            contacts, ...>, "hasResults": bool, "resultsSection": <posted
+            results: participant flow, baseline, outcome measures per arm,
+            adverse events; null if none are posted>}.
           - CTIS: objectives, endpoints, inclusion/exclusion criteria,
             products, sponsor and its public contact, sites, status and
             recruitment per country, dates, enrollment, and the NCT number

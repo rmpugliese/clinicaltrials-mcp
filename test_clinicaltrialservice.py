@@ -251,6 +251,14 @@ class TestAllTrialsEndpoint:
             assert 'trials' in data
             assert len(data['trials']) == 1  # Only one trial has Canada location
 
+    def test_all_trials_all_statuses(self, client, valid_api_key, mock_trial_data):
+        """all_statuses=true is passed on to get_trial_data; without it, the default statuses."""
+        with patch('clinicaltrialservice.get_trial_data', return_value=mock_trial_data) as get_data:
+            client.get('/all_trials?disease=cancer', headers={'x-api-key': valid_api_key})
+            client.get('/all_trials?disease=cancer&all_statuses=true', headers={'x-api-key': valid_api_key})
+
+        assert [c.args for c in get_data.call_args_list] == [('cancer', False), ('cancer', True)]
+
     def test_all_trials_missing_disease(self, client, valid_api_key):
         """Test all trials without disease parameter."""
         response = client.get(
@@ -720,3 +728,15 @@ class TestTrialEndpoint:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+def test_get_trial_data_filters_statuses_unless_all_statuses():
+    """Every status is cached; the default statuses are returned unless all_statuses."""
+    from clinicaltrialservice import get_trial_data
+    studies = [
+        {'protocolSection': {'statusModule': {'overallStatus': status}}}
+        for status in ('RECRUITING', 'TERMINATED', 'UNKNOWN')
+    ]
+    with patch('clinicaltrialservice.get_cached_api_data', return_value={'studies': studies}):
+        assert len(get_trial_data('cancer')['studies']) == 1
+        assert len(get_trial_data('cancer', all_statuses=True)['studies']) == 3

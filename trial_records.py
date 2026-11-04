@@ -45,6 +45,13 @@ CTIS_STATUS_LABELS: dict = {
 # Status codes that can include trials recruiting in at least one country.
 CTIS_MAY_BE_RECRUITING = [3, 4, 5]
 
+# ClinicalTrials.gov statuses served unless all statuses are asked for: the
+# others are WITHDRAWN, TERMINATED, SUSPENDED, UNKNOWN and expanded access.
+CTGOV_DEFAULT_STATUSES = frozenset({
+    "ACTIVE_NOT_RECRUITING", "COMPLETED", "ENROLLING_BY_INVITATION",
+    "NOT_YET_RECRUITING", "RECRUITING", "APPROVED_FOR_MARKETING",
+})
+
 _EUCT_RE = re.compile(r"^\d{4}-\d{6}-\d{2}-\d{2}$")
 _NCT_RE = re.compile(r"^NCT\d{8}$", re.I)
 
@@ -63,6 +70,12 @@ def is_nct_id(trial_id: str) -> bool:
 # ClinicalTrials.gov
 # ---------------------------------------------------------------------------
 
+def ctgov_default_status(study: dict) -> bool:
+    """True if the study's status is one of CTGOV_DEFAULT_STATUSES."""
+    status = study.get("protocolSection", {}).get("statusModule", {}).get("overallStatus")
+    return status in CTGOV_DEFAULT_STATUSES
+
+
 def simplify_ctgov(study: dict) -> dict:
     """Flat record for a raw ClinicalTrials.gov study."""
     ps = study.get("protocolSection", {})
@@ -79,6 +92,8 @@ def simplify_ctgov(study: dict) -> dict:
         "StudyUrl": f"https://clinicaltrials.gov/study/{nct_id}",
         "BriefSummary": ps.get("descriptionModule", {}).get("briefSummary"),
         "OverallStatus": status_mod.get("overallStatus"),
+        "WhyStopped": status_mod.get("whyStopped"),
+        "HasResults": bool(study.get("hasResults")),
         "StartDate": status_mod.get("startDateStruct", {}).get("date"),
         "CompletionDate": status_mod.get("completionDateStruct", {}).get("date"),
         "LeadSponsor": ps.get("sponsorCollaboratorsModule", {}).get("leadSponsor", {}).get("name"),
@@ -101,10 +116,11 @@ def simplify_ctgov(study: dict) -> dict:
 
 
 def ctgov_details(study: dict) -> dict:
-    """Full protocol of a ClinicalTrials.gov study (results are left out)."""
+    """Full protocol of a ClinicalTrials.gov study and its posted results (None if there are none)."""
     return {
         "protocolSection": study.get("protocolSection", {}),
         "hasResults": bool(study.get("hasResults")),
+        "resultsSection": study.get("resultsSection"),
     }
 
 
@@ -347,6 +363,8 @@ def ctis_normalize(parsed: dict) -> dict:
         "BriefSummary": parsed.get("primary_objective", ""),
         "OverallStatus": status_enum(parsed.get("ctis_status", "")) or None,
         "Recruiting": parsed.get("recruiting"),
+        "WhyStopped": None,  # not read from CTIS
+        "HasResults": None,  # not read from CTIS
         "StartDate": parsed.get("start_date"),
         "CompletionDate": parsed.get("estimated_end_date"),
         "LeadSponsor": parsed.get("sponsor"),

@@ -30,7 +30,7 @@ Two server implementations sharing the same data layer:
 
 | File | Content | Key |
 |------|---------|-----|
-| `api_cache.json` | Raw ClinicalTrials.gov responses | MD5 of disease name |
+| `api_cache.json` | Raw ClinicalTrials.gov studies of every status, with posted results | MD5 of disease name |
 | `response_cache_flask.json` | Processed Flask responses | MD5 of endpoint+disease+country |
 | `response_cache_mcp.json` | Processed MCP responses | MD5 of endpoint+disease+country |
 | `ctis_cache.json` | CTIS trial details and lists | MD5 of EUCT code or query |
@@ -125,6 +125,14 @@ All trials for a disease, with optional country filter.
 |-----------|------|----------|
 | `disease` | string | yes |
 | `country` | string | no |
+| `all_statuses` | `true` / `false` (default) | no |
+
+By default ClinicalTrials.gov trials that were withdrawn, terminated or suspended, of unknown status or for expanded access are left out. `all_statuses=true` returns them too, e.g. to study why trials stopped early. CTIS trials are the same either way: every status except revoked and not authorised.
+
+```bash
+curl -H "x-api-key: <key>" \
+  "http://localhost:5000/all_trials?disease=glioblastoma&all_statuses=true"
+```
 
 Each trial in `/current_trials` and `/all_trials` carries:
 
@@ -133,6 +141,8 @@ Each trial in `/current_trials` and `/all_trials` carries:
 | `NCTId` | NCT ID, or EUCT number for CTIS trials |
 | `Registry` | `clinicaltrials.gov` or `ctis` |
 | `OverallStatus` | Registry's own vocabulary: ClinicalTrials.gov (`RECRUITING`, `COMPLETED`, ...) or CTIS (`AUTHORISED`, `ENDED`, `HALTED`, ...) |
+| `WhyStopped` | ClinicalTrials.gov: the reason a trial stopped early, as written by the sponsor. Null for CTIS. |
+| `HasResults` | ClinicalTrials.gov: results are posted on the registry (`/trial/<id>` returns them). Null for CTIS. |
 | `Recruiting` | CTIS only: recruitment is open in at least one country, from the trial's events (CTIS's overall status does not say whether an authorised trial is recruiting). `/current_trials` keeps CTIS trials recruiting in the requested country. |
 | `StartDate`, `CompletionDate` | CTIS: `CompletionDate` is the estimated end date |
 | `LeadSponsor`, `EnrollmentCount` | |
@@ -147,7 +157,7 @@ One trial in full, by NCT ID or EUCT number. Served from the cache when availabl
 
 Returns `{"trial": {...}}` with the fields above plus `Details`:
 
-- ClinicalTrials.gov: `{"protocolSection": ..., "hasResults": bool}` — the registry's full protocol (eligibility, arms, outcomes, locations with status and contacts). Posted results are not included.
+- ClinicalTrials.gov: `{"protocolSection": ..., "hasResults": bool, "resultsSection": ...}` — the registry's full protocol (eligibility, arms, outcomes, locations with status and contacts, references) and its posted results (participant flow, baseline characteristics, outcome measures per arm, adverse events), or `null` when none are posted.
 - CTIS: objectives, endpoints, inclusion/exclusion criteria, products, sponsor and its public contact, sites, status and recruitment per country, dates, enrollment, and `nct_number` when the trial is also on ClinicalTrials.gov.
 
 ```bash

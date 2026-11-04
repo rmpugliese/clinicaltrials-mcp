@@ -18,6 +18,7 @@ import llm
 from trial_records import (
     CTIS_COUNTRY_TO_ISO as _CTIS_COUNTRY_TO_ISO,
     CTIS_MAY_BE_RECRUITING,
+    ctgov_default_status,
     ctgov_details,
     ctis_recruiting_in,
     ctis_normalize as _ctis_normalize,
@@ -42,7 +43,7 @@ TRIAL_CACHE_FILE = 'trial_cache.json'  # Cache for single ClinicalTrials.gov stu
 CACHE_TIMEOUT = 86400  # Cache expiry time in seconds (24 hours)
 # Bump when the shape of the returned records changes, so cached responses
 # built with the old shape are not served.
-RECORD_VERSION = 'v3'
+RECORD_VERSION = 'v4'
 
 # Load caches if they exist
 if os.path.exists(API_CACHE_FILE):
@@ -82,7 +83,8 @@ ALLOWED_API_KEYS = os.getenv('ALLOWED_API_KEYS', '').split(',')
 
 
 def get_api_cache_key(disease):
-    return hashlib.md5(disease.encode('utf-8')).hexdigest()
+    # Entries keyed on the bare disease hold only the default statuses: not reused
+    return hashlib.md5(f"all_statuses_{disease}".encode('utf-8')).hexdigest()
 
 def get_response_cache_key(endpoint, disease, country):
     return hashlib.md5(f"{RECORD_VERSION}_{endpoint}_{disease}_{country}".encode('utf-8')).hexdigest()
@@ -105,12 +107,23 @@ def set_api_cache_data(disease, data):
     with open(API_CACHE_FILE, 'w') as f:
         json.dump(api_cache, f)
 
-def get_trial_data(disease):
-    cached_data = get_cached_api_data(disease)
-    if cached_data:
-        print(f"Getting from cache disease {disease}, trials {len(cached_data['studies'])}")
-        return cached_data
+def get_trial_data(disease, all_statuses=False):
+    """
+    Studies of every status are downloaded and cached; unless all_statuses,
+    only those with one of CTGOV_DEFAULT_STATUSES are returned.
+    """
+    data = get_cached_api_data(disease)
+    if data:
+        print(f"Getting from cache disease {disease}, trials {len(data['studies'])}")
+    else:
+        data = download_trial_data(disease)
+        if not data:
+            return None
+    if all_statuses:
+        return data
+    return {'studies': [s for s in data['studies'] if ctgov_default_status(s)]}
 
+def download_trial_data(disease):
     # Pagination parameters
     page_size = 512
     page_token = None
@@ -120,7 +133,6 @@ def get_trial_data(disease):
     while True:
         params = {
             "query.cond": disease,
-            "filter.overallStatus": 'ACTIVE_NOT_RECRUITING,COMPLETED,ENROLLING_BY_INVITATION,NOT_YET_RECRUITING,RECRUITING,APPROVED_FOR_MARKETING',
             "pageSize": page_size
         }
         if page_token:
@@ -416,13 +428,15 @@ def all_trials():
 
     country = request.args.get('country')
     cache_country = country if country else 'None'
-    endpoint = 'all_trials'
+    # Default: no withdrawn, terminated, suspended, unknown-status or expanded-access CT.gov trials
+    all_statuses = request.args.get('all_statuses', '').lower() in ('1', 'true', 'yes')
+    endpoint = 'all_trials_all_statuses' if all_statuses else 'all_trials'
 
     cached_response = get_cached_response(endpoint, disease, cache_country)
     if cached_response and len(cached_response) > 0:
         return jsonify({'trials': cached_response})
 
-    trial_data = get_trial_data(disease)
+    trial_data = get_trial_data(disease, all_statuses)
     if not trial_data:
         return jsonify({'error': 'No data found'}), 404
 
