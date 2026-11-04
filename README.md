@@ -81,6 +81,14 @@ python clinicaltrialservice.py --port 5000
 
 It listens on `127.0.0.1` only, behind the reverse proxy. `--host 0.0.0.0` exposes it on the network; `--debug` turns on the Flask reloader and interactive debugger, for local development only.
 
+In production, run it under gunicorn instead of the Flask development server:
+
+```bash
+gunicorn --workers 1 --threads 8 --timeout 600 --bind 0.0.0.0:5000 clinicaltrialservice:app
+```
+
+Keep one worker: the caches live in memory and in shared JSON files, and several processes would overwrite each other. The long timeout covers the first download of a disease and the LLM calls of `check_eligibility`.
+
 ### MCP Server — stdio (local clients)
 
 ```bash
